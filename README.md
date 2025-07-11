@@ -213,3 +213,4 @@ history = coordinator.get_history()
 ## 📝 License
 
 MIT License - Xem file LICENSE để biết thêm chi tiết. # multi_agent_cosmo
+# multi_agent_cosmo
