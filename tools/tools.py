@@ -1,12 +1,9 @@
-import os
-import json
 import asyncio
-from typing import List, Dict, Any, Optional, Union
+from typing import List, Dict, Any, Optional
 import chromadb
 from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
-import numpy as np
-import pandas as pd
+
 from datetime import datetime
 
 class VectorDatabaseTool:

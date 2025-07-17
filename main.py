@@ -1,165 +1,314 @@
-import asyncio 
-import time 
-import warnings
+#!/usr/bin/env python3
+"""
+Main entry point for the Cosmo Agent workflow system.
+This file sets up the CosmoWorkflow with main agent and sub-agents,
+creates the session service, and provides interaction functions.
+"""
 
-from google.adk import artifacts 
-from google.adk import Runner
-from google.adk.artifacts import InMemoryArtifactService
-from google.adk.cli.utils import logs 
+import asyncio
+import logging
+import json
+import time
+from datetime import datetime
+from typing import Dict, Any
+
+from google.genai import types
 from google.adk.sessions import InMemorySessionService
-from google.adk.sessions import Session
-from google.genai import types 
+from google.adk.runners import Runner
 
-from main_agent import agent 
-from dotenv import load_dotenv
+# Import our custom workflow and agents
+from workflow.cosmo_workflow import CosmoWorkflow
+from agent.agent import main_agent, sub_agent
 
-load_dotenv(override=True)
-warnings.filterwarnings('ignore', category=UserWarning)
-logs.log_to_tmp_folder()
+# --- Constants ---
+APP_NAME = "cosmo_agent"
+USER_ID = "user_001"
+SESSION_ID = "session_001"
 
+# --- Configure Logging ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-async def inspect_agent_session(session_service, session, app_name, user_id):
-    print("\n===== SESSION INFO =====")
-    print(f"Session ID: {session.id}")
-    print(f"App Name: {session.app_name}")
-    print(f"User ID: {session.user_id}")
-    print(f"Last Update: {session.last_update_time}")
-    print(f"Current State (Memory): {session.state}")
+# --- Create the CosmoWorkflow instance ---
+cosmo_workflow = CosmoWorkflow(
+    name="CosmoWorkflow",
+    main_agent=main_agent,
+    sub_agents_list=sub_agent
+)
 
-    print("\n📜 FULL SESSION EVENT LOG")
-    if not session.events:
-        print("(No events in this session)")
-        return
-    for idx, e in enumerate(session.events, 1):
-        print("=" * 60)
-        print(f"Event #{idx}")
-        print(f"🕓 Event Type: {getattr(e, 'type', 'N/A')} | Author: {getattr(e, 'author', 'N/A')}")
-        if hasattr(e, 'timestamp'):
-            print(f"⏰ Timestamp: {e.timestamp}")
-        if hasattr(e, 'content') and e.content:
-            try:
-                print("💬 Content:", e.content.model_dump(exclude_none=True))
-            except Exception:
-                print("💬 Content:", e.content)
-        else:
-            print("💬 Content: (None)")
-        if hasattr(e, 'actions') and e.actions:
-            if hasattr(e.actions, 'state_delta') and e.actions.state_delta:
-                print("🧠 State Change:", e.actions.state_delta)
-            if hasattr(e.actions, 'artifacts') and e.actions.artifacts:
-                print("📦 Artifacts:", e.actions.artifacts)
-        else:
-            print("⚡ Actions: (None)")
-        print("=" * 60)
+# --- Initial session state ---
+INITIAL_STATE = {
+    "user_query": "",
+    "task_list": [],
+    "search_results": {},
+    "evaluation_result": {},
+    "workflow_status": "initialized"
+}
 
-
-async def main(): 
-    app_name = "my_app"
-    user_id_1 = 'user1'
+# --- Setup Session and Runner ---
+async def setup_session_and_runner():
+    """
+    Set up the session service and runner for the Cosmo workflow.
+    
+    Returns:
+        tuple: (session_service, runner)
+    """
     session_service = InMemorySessionService()
-    artifact_service = InMemoryArtifactService()
-    runner = Runner( 
-        app_name=app_name,
-        agent=agent.root_agent,
-        artifact_service=artifact_service,
-        session_service=session_service,
+    session = await session_service.create_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+        state=INITIAL_STATE
     )
-    session_11 = await session_service.create_session( 
-        app_name=app_name, user_id=user_id_1
+    logger.info(f"Initial session state: {session.state}")
+    
+    runner = Runner(
+        agent=cosmo_workflow,
+        app_name=APP_NAME,
+        session_service=session_service
     )
     
-    async def run_prompt(session: Session, new_message: str): 
-        content = types.Content(
-            role='user', parts=[types.Part.from_text(text=new_message)]
-        )
-        print('** User says:', content.model_dump(exclude_none=True))
-        
-        sub_agent_responses = []
-        
-        async for event in runner.run_async(
-            user_id=user_id_1,
-            session_id=session.id,
-            new_message=content,
-        ):
-            try:
-                if event.content and event.content.parts:
-                    for part in event.content.parts:
-                        if hasattr(part, 'text') and part.text:
-                            print(f'** {event.author}: {part.text}')
-                            if event.author.startswith('Agent'):
-                                sub_agent_responses.append({
-                                    'agent': event.author,
-                                    'response': part.text,
-                                    'timestamp': time.time()
-                                })
-                        elif hasattr(part, 'function_call') and part.function_call:
-                            print(f'** {event.author}: [Function Call] {part.function_call.name}')
-                            if hasattr(part.function_call, 'args') and part.function_call.args:
-                                print(f'    Args: {part.function_call.args}')
-                        elif hasattr(part, 'function_response') and part.function_response:
-                            print(f'** {event.author}: [Function Response] {part.function_response.name}')
-                            if hasattr(part.function_response, 'response') and part.function_response.response:
-                                response_content = part.function_response.response.get('content', '')
-                                if response_content:
-                                    display_text = response_content[:300] + '...' if len(response_content) > 300 else response_content
-                                    print(f'    Response: {display_text}')
-                                    if event.author.startswith('Agent'):
-                                        sub_agent_responses.append({
-                                            'agent': event.author,
-                                            'response': response_content,
-                                            'timestamp': time.time(),
-                                            'type': 'function_response'
-                                        })
-                else:
-                    print(f'** {event.author}: [Event Type: {type(event).__name__}]')
-            except Exception as e:
-                print(f'** {event.author}: [Error processing event: {str(e)}]')
-        
-        if sub_agent_responses:
-            print("\n" + "="*60)
-            print("📊 SUB-AGENT RESPONSES SUMMARY")
-            print("="*60)
-            for i, response in enumerate(sub_agent_responses, 1):
-                print(f"\n{i}. {response['agent']}:")
-                if response.get('type') == 'function_response':
-                    print(f"   [Function Response] {response['response'][:200]}...")
-                else:
-                    print(f"   {response['response'][:200]}...")
-            print("="*60)
+    return session_service, runner
 
+# --- Main interaction function ---
+async def run_cosmo_workflow(user_query: str) -> Dict[str, Any]:
+    """
+    Run the Cosmo workflow with a user query.
+    
+    Args:
+        user_query: The user's research question or topic
+        
+    Returns:
+        Dict containing the final response and session state
+    """
+    # Record start time
     start_time = time.time()
-    print('Start time:', start_time)
-    print('------------------------------------')
-    await run_prompt(session_11, 'Tell me about AI in healthcare and machine learning in finance and cyber security')
+    start_datetime = datetime.now()
     
-    # Lấy lại session mới nhất để đảm bảo có đầy đủ event
-    if session_11 is not None:
-        session_11 = await session_service.get_session(
-            app_name=app_name,
-            user_id=user_id_1,
-            session_id=session_11.id
-        )
-    if session_11 is None:
-        print("[Warning] session_11 is None after get_session. Cannot inspect or list artifacts.")
-        return
+    logger.info(f"🚀 Starting Cosmo workflow with query: {user_query}")
+    logger.info(f"⏰ Start time: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
     
-    stats = agent.get_sub_agent_stats()
-    print(f"\n📈 Final Statistics:")
-    print(f"Total sub-agent calls: {stats['total_calls']}")
-    print(f"Individual calls: {stats['agent_calls']}")
-
-    print(await artifact_service.list_artifact_keys(
-        app_name=app_name, user_id=user_id_1, session_id=session_11.id
-    ))
-
-    # 👉 New: Inspect all session events and state changes
-    await inspect_agent_session(session_service, session_11, app_name, user_id_1)
-
+    # Setup session and runner
+    session_service, runner = await setup_session_and_runner()
+    
+    # Get current session
+    current_session = await session_service.get_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=SESSION_ID
+    )
+    
+    if not current_session:
+        logger.error("❌ Session not found!")
+        return {"error": "Session not found"}
+    
+    # Update session with user query
+    current_session.state["user_query"] = user_query
+    current_session.state["workflow_status"] = "running"
+    logger.info(f"📝 Updated session with user query: {user_query}")
+    
+    # Create content for the workflow
+    content = types.Content(
+        role='user',
+        parts=[types.Part(text=user_query)]
+    )
+    
+    # Run the workflow
+    events = runner.run_async(
+        user_id=USER_ID,
+        session_id=SESSION_ID,
+        new_message=content
+    )
+    
+    # Process events and capture final response
+    final_response = "No final response captured."
+    event_count = 0
+    
+    try:
+        async for event in events:
+            event_count += 1
+            logger.info(f"📨 Event #{event_count} from [{event.author}]")
+            
+            # Check if this is a final response
+            if event.is_final_response() and event.content and event.content.parts and len(event.content.parts) > 0:
+                part_text = event.content.parts[0].text
+                if part_text:
+                    final_response = part_text
+                    logger.info(f"✅ Final response captured from [{event.author}]: {final_response[:100]}...")
+                
+    except Exception as e:
+        logger.error(f"❌ Error during workflow execution: {str(e)}")
+        return {"error": f"Workflow execution failed: {str(e)}"}
+    
+    # Get final session state
+    final_session = await session_service.get_session(
+        app_name=APP_NAME,
+        user_id=USER_ID,
+        session_id=SESSION_ID
+    )
+    
+    # Update final session state
+    final_session_state = {}
+    # Calculate execution time
     end_time = time.time()
-    print('------------------------------------')
-    print('End time:', end_time)
-    print('Total time:', end_time - start_time)
+    end_datetime = datetime.now()
+    execution_time = end_time - start_time
+    
+    # Update final session state
+    if final_session:
+        final_session.state["workflow_status"] = "completed"
+        final_session.state["execution_time"] = execution_time
+        final_session.state["start_time"] = start_datetime.isoformat()
+        final_session.state["end_time"] = end_datetime.isoformat()
+        final_session_state = final_session.state
+    
+    # Return results
+    result = {
+        "query": user_query,
+        "final_response": final_response,
+        "events_processed": event_count,
+        "session_state": final_session_state,
+        "status": "success",
+        "execution_time": execution_time,
+        "start_time": start_datetime.isoformat(),
+        "end_time": end_datetime.isoformat()
+    }
+    
+    logger.info(f"🎉 Workflow completed successfully! Processed {event_count} events.")
+    logger.info(f"⏰ End time: {end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info(f"⏱️ Total execution time: {execution_time:.2f} seconds")
+    return result
 
+# --- Interactive CLI function ---
+async def interactive_mode():
+    """
+    Run the Cosmo workflow in interactive mode.
+    """
+    print("🤖 Welcome to Cosmo Agent Interactive Mode!")
+    print("💡 Ask me anything and I'll coordinate my team of specialists to help you.")
+    print("🚪 Type 'exit' or 'quit' to leave.\n")
+    
+    while True:
+        try:
+            # Get user input
+            user_input = input("🔍 Your question: ").strip()
+            
+            # Check for exit commands
+            if user_input.lower() in ['exit', 'quit', 'bye']:
+                print("👋 Goodbye! Thanks for using Cosmo Agent!")
+                break
+            
+            if not user_input:
+                print("❓ Please enter a question or type 'exit' to quit.")
+                continue
+            
+            # Run the workflow
+            print(f"\n🔄 Processing your query: {user_input}")
+            print("⏳ Please wait while I coordinate with my team...\n")
+            
+            result = await run_cosmo_workflow(user_input)
+            
+            # Display results
+            if result.get("error"):
+                print(f"❌ Error: {result['error']}")
+            else:
+                print("=" * 60)
+                print("🎯 COSMO AGENT RESPONSE:")
+                print("=" * 60)
+                print(result["final_response"])
+                print("=" * 60)
+                print(f"📊 Events processed: {result['events_processed']}")
+                print(f"⏱️  Status: {result['status']}")
+                print()
+            
+        except KeyboardInterrupt:
+            print("\n\n👋 Goodbye! Thanks for using Cosmo Agent!")
+            break
+        except Exception as e:
+            print(f"❌ Unexpected error: {str(e)}")
+            logger.error(f"Unexpected error in interactive mode: {str(e)}")
 
-if __name__ == '__main__':
-    asyncio.run(main())
+# --- Batch processing function ---
+async def batch_process_queries(queries: list[str]) -> list[Dict[str, Any]]:
+    """
+    Process multiple queries in batch mode.
+    
+    Args:
+        queries: List of user queries to process
+        
+    Returns:
+        List of results for each query
+    """
+    results = []
+    
+    for i, query in enumerate(queries, 1):
+        logger.info(f"🔄 Processing query {i}/{len(queries)}: {query}")
+        result = await run_cosmo_workflow(query)
+        results.append(result)
+        
+        # Add a small delay between queries to avoid overwhelming the system
+        await asyncio.sleep(1)
+    
+    return results
+
+# --- Main entry point ---
+async def main():
+    """
+    Main entry point for the Cosmo Agent system.
+    """
+    logger.info("🚀 Starting Cosmo Agent System")
+    
+    # Fixed query for testing
+    fixed_query = "Tell me about AI in healthcare and machine learning in finance and cyber security"
+    
+    print(f"🔍 Testing with fixed query: {fixed_query}")
+    print("⏳ Please wait while I coordinate with my team...\n")
+    
+    # Run the workflow with fixed query
+    result = await run_cosmo_workflow(fixed_query)
+    
+    # Display results
+    if result.get("error"):
+        print(f"❌ Error: {result['error']}")
+    else:
+        print("=" * 60)
+        print("🎯 COSMO AGENT RESPONSE:")
+        print("=" * 60)
+        print(result["final_response"])
+        print("=" * 60)
+        print(f"📊 Events processed: {result['events_processed']}")
+        print(f"⏱️  Status: {result['status']}")
+        print(f"⏰ Start time: {datetime.fromisoformat(result['start_time']).strftime('%H:%M:%S')}")
+        print(f"🏁 End time: {datetime.fromisoformat(result['end_time']).strftime('%H:%M:%S')}")
+        print(f"⏱️ Total execution time: {result['execution_time']:.2f} seconds")
+        
+        # Show detailed timing if available
+        if "workflow_timing" in result["session_state"]:
+            timing = result["session_state"]["workflow_timing"]
+            print("\n⏱️ Detailed Timing Breakdown:")
+            print(f"  📋 Step 1 (Task Decomposition): {timing['step1_duration']:.2f}s")
+            print(f"  🔄 Step 2 (Sub-agents Parallel): {timing['step2_duration']:.2f}s")
+            print(f"  🔍 Step 3 (Main Agent Evaluation): {timing['step3_duration']:.2f}s")
+            if timing['step4_duration'] > 0:
+                print(f"  🔄 Step 4 (Retry + Final Eval): {timing['step4_duration']:.2f}s")
+            else:
+                print(f"  ⏭️ Step 4 (Retry): Skipped")
+            print(f"  🏁 Total Workflow Time: {timing['total_time']:.2f}s")
+        
+        print("\n📋 Final Session State:")
+        # Don't show timing details in session state to avoid clutter
+        session_state_clean = {k: v for k, v in result["session_state"].items() if k != "workflow_timing"}
+        print(json.dumps(session_state_clean, indent=2, ensure_ascii=False))
+        print("=" * 60)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 System shutdown requested. Goodbye!")
+    except Exception as e:
+        logger.error(f"❌ Fatal error: {str(e)}")
+        print(f"❌ Fatal error: {str(e)}")
