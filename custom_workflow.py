@@ -5,6 +5,12 @@ from google.adk.agents import BaseAgent
 from google.adk.events import Event
 from google.adk.agents.invocation_context import InvocationContext
 
+
+from typing import override
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 def _create_branch_ctx_for_sub_agent(
     agent: BaseAgent,
     sub_agent: BaseAgent,
