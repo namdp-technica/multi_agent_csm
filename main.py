@@ -262,7 +262,7 @@ async def main():
     logger.info("🚀 Starting Cosmo Agent System")
     
     # Fixed query for testing
-    fixed_query = "Tell me about AI in healthcare and machine learning in finance and cyber security"
+    fixed_query = "Analyze the recent breakthroughs in quantum computing and their specific applications in modern cryptography and blockchain security"
     
     print(f"🔍 Testing with fixed query: {fixed_query}")
     print("⏳ Please wait while I coordinate with my team...\n")
