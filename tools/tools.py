@@ -202,23 +202,115 @@ class VectorDatabaseTool:
                 "total_found": 0
             }
     
-    def semantic_search(self, query: str, n_results: int, categories: Optional[List[str]] = None) -> Dict[str, Any]:
+    @agent_tool
+    def semantic_search(self, query: str, n_results: int = 5, filter_metadata: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        Perform semantic search with optional category filtering
+        Perform semantic search on the vector database
         
         Args:
-            query: Search query
-            n_results: Number of results to return
-            categories: Optional list of categories to filter by
+            query: Search query string
+            n_results: Number of results to return (default: 5)
+            filter_metadata: Optional metadata filter
             
         Returns:
-            Search results
+            Dict containing search results with documents, metadata, and scores
         """
-        filter_metadata = None
-        if categories:
-            filter_metadata = {"category": {"$in": categories}}
+        try:
+            # Generate embedding for the query
+            query_embedding = self.embedding_model.encode([query]).tolist()
+            
+            # Perform the search
+            results = self.collection.query(
+                query_embeddings=query_embedding,
+                n_results=n_results,
+                where=filter_metadata,
+                include=['documents', 'metadatas', 'distances']
+            )
+            
+            # Format results
+            formatted_results = []
+            if results['documents'] and len(results['documents']) > 0:
+                documents = results['documents'][0]
+                metadatas = results['metadatas'][0] if results['metadatas'] else [{}] * len(documents)
+                distances = results['distances'][0] if results['distances'] else [0] * len(documents)
+                ids = results['ids'][0] if results['ids'] else [f'doc_{i}' for i in range(len(documents))]
+                
+                for i, (doc, metadata, distance, doc_id) in enumerate(zip(documents, metadatas, distances, ids)):
+                    # Convert distance to similarity score (lower distance = higher similarity)
+                    similarity_score = 1 / (1 + distance) if distance > 0 else 1.0
+                    
+                    formatted_results.append({
+                        'rank': i + 1,
+                        'document': doc,
+                        'metadata': metadata or {},
+                        'similarity_score': similarity_score,
+                        'id': doc_id
+                    })
+            
+            return {
+                'query': query,
+                'results': formatted_results,
+                'total_found': len(formatted_results)
+            }
+            
+        except Exception as e:
+            return {
+                'query': query,
+                'results': [],
+                'total_found': 0,
+                'error': f"Search failed: {str(e)}"
+            }
+
+    @agent_tool
+    def image_search(self, query: str, k: int = 5) -> Dict[str, Any]:
+        """
+        Search for k images related to a query
         
-        return self.query_database(query, n_results, filter_metadata)
+        Args:
+            query: Search query string
+            k: Number of images to return (default: 5)
+            
+        Returns:
+            Dict containing image search results
+        """
+        try:
+            # TODO: Thay thế bằng logic tìm kiếm ảnh thực tế của bạn
+            # Ví dụ: tìm kiếm trong database ảnh, vector search cho ảnh, etc.
+            
+            # Mock data - thay thế bằng implementation thực tế
+            mock_images = [
+                {
+                    "id": f"img_{i}",
+                    "path": f"/path/to/image_{i}.jpg",
+                    "url": f"https://example.com/image_{i}.jpg",
+                    "description": f"Image {i} related to: {query}",
+                    "relevance_score": 0.9 - (i * 0.1),
+                    "metadata": {
+                        "size": "1024x768",
+                        "format": "jpg",
+                        "category": "general"
+                    }
+                }
+                for i in range(1, k + 1)
+            ]
+            
+            return {
+                "query": query,
+                "total_found": len(mock_images),
+                "images": mock_images,
+                "search_metadata": {
+                    "search_time": "0.1s",
+                    "algorithm": "mock_image_search"
+                }
+            }
+            
+        except Exception as e:
+            return {
+                "query": query,
+                "total_found": 0,
+                "images": [],
+                "error": f"Image search failed: {str(e)}"
+            }
     
     def get_collection_stats(self) -> Dict[str, Any]:
         """Get statistics about the collection"""

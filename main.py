@@ -16,12 +16,12 @@ from google.genai import types
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
 
-# Import our custom workflow and agents
+# Import our new VLM workflow and agents
 from workflow.cosmo_workflow import CosmoWorkflow
-from agent.agent import main_agent, sub_agent
+from agent.agent import main_agent, agent_search, vlm_agents, final_response_agent
 
 # --- Constants ---
-APP_NAME = "cosmo_agent"
+APP_NAME = "vlm_cosmo_agent"
 USER_ID = "user_001"
 SESSION_ID = "session_001"
 
@@ -32,26 +32,27 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- Create the CosmoWorkflow instance ---
+# --- Create the VLM CosmoWorkflow instance ---
 cosmo_workflow = CosmoWorkflow(
-    name="CosmoWorkflow",
+    name="VLMCosmoWorkflow",
     main_agent=main_agent,
-    sub_agents_list=sub_agent
+    retriever_agent=agent_search,
+    vlm_agents=vlm_agents,
+    final_response_agent=final_response_agent
 )
 
 # --- Initial session state ---
 INITIAL_STATE = {
     "user_query": "",
-    "task_list": [],
-    "search_results": {},
-    "evaluation_result": {},
+    "retrieved_images": {},
+    "vlm_responses": {},
     "workflow_status": "initialized"
 }
 
 # --- Setup Session and Runner ---
 async def setup_session_and_runner():
     """
-    Set up the session service and runner for the Cosmo workflow.
+    Set up the session service and runner for the VLM Cosmo workflow.
     
     Returns:
         tuple: (session_service, runner)
@@ -74,12 +75,12 @@ async def setup_session_and_runner():
     return session_service, runner
 
 # --- Main interaction function ---
-async def run_cosmo_workflow(user_query: str) -> Dict[str, Any]:
+async def run_vlm_workflow(user_query: str) -> Dict[str, Any]:
     """
-    Run the Cosmo workflow with a user query.
+    Run the VLM Cosmo workflow with a user query.
     
     Args:
-        user_query: The user's research question or topic
+        user_query: The user's question about images
         
     Returns:
         Dict containing the final response and session state
@@ -88,7 +89,7 @@ async def run_cosmo_workflow(user_query: str) -> Dict[str, Any]:
     start_time = time.time()
     start_datetime = datetime.now()
     
-    logger.info(f"🚀 Starting Cosmo workflow with query: {user_query}")
+    logger.info(f"🚀 Starting VLM Cosmo workflow with query: {user_query}")
     logger.info(f"⏰ Start time: {start_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
     
     # Setup session and runner
@@ -126,11 +127,22 @@ async def run_cosmo_workflow(user_query: str) -> Dict[str, Any]:
     # Process events and capture final response
     final_response = "No final response captured."
     event_count = 0
+    vlm_responses = []
     
     try:
         async for event in events:
             event_count += 1
             logger.info(f"📨 Event #{event_count} from [{event.author}]")
+            
+            # Track VLM agent responses
+            if event.author.startswith('VLMAgent') and event.content and event.content.parts:
+                for part in event.content.parts:
+                    if hasattr(part, 'text') and part.text:
+                        vlm_responses.append({
+                            'agent': event.author,
+                            'response': part.text,
+                            'timestamp': time.time()
+                        })
             
             # Check if this is a final response
             if event.is_final_response() and event.content and event.content.parts and len(event.content.parts) > 0:
@@ -150,14 +162,13 @@ async def run_cosmo_workflow(user_query: str) -> Dict[str, Any]:
         session_id=SESSION_ID
     )
     
-    # Update final session state
-    final_session_state = {}
     # Calculate execution time
     end_time = time.time()
     end_datetime = datetime.now()
     execution_time = end_time - start_time
     
     # Update final session state
+    final_session_state = {}
     if final_session:
         final_session.state["workflow_status"] = "completed"
         final_session.state["execution_time"] = execution_time
@@ -169,6 +180,7 @@ async def run_cosmo_workflow(user_query: str) -> Dict[str, Any]:
     result = {
         "query": user_query,
         "final_response": final_response,
+        "vlm_responses": vlm_responses,
         "events_processed": event_count,
         "session_state": final_session_state,
         "status": "success",
@@ -177,7 +189,7 @@ async def run_cosmo_workflow(user_query: str) -> Dict[str, Any]:
         "end_time": end_datetime.isoformat()
     }
     
-    logger.info(f"🎉 Workflow completed successfully! Processed {event_count} events.")
+    logger.info(f"🎉 VLM Workflow completed successfully! Processed {event_count} events.")
     logger.info(f"⏰ End time: {end_datetime.strftime('%Y-%m-%d %H:%M:%S')}")
     logger.info(f"⏱️ Total execution time: {execution_time:.2f} seconds")
     return result
@@ -185,20 +197,20 @@ async def run_cosmo_workflow(user_query: str) -> Dict[str, Any]:
 # --- Interactive CLI function ---
 async def interactive_mode():
     """
-    Run the Cosmo workflow in interactive mode.
+    Run the VLM Cosmo workflow in interactive mode.
     """
-    print("🤖 Welcome to Cosmo Agent Interactive Mode!")
-    print("💡 Ask me anything and I'll coordinate my team of specialists to help you.")
+    print("🤖 Welcome to VLM Cosmo Agent Interactive Mode!")
+    print("💡 Ask me questions about images and I'll help you analyze them.")
     print("🚪 Type 'exit' or 'quit' to leave.\n")
     
     while True:
         try:
             # Get user input
-            user_input = input("🔍 Your question: ").strip()
+            user_input = input("🔍 Your image question: ").strip()
             
             # Check for exit commands
             if user_input.lower() in ['exit', 'quit', 'bye']:
-                print("👋 Goodbye! Thanks for using Cosmo Agent!")
+                print("👋 Goodbye! Thanks for using VLM Cosmo Agent!")
                 break
             
             if not user_input:
@@ -207,100 +219,77 @@ async def interactive_mode():
             
             # Run the workflow
             print(f"\n🔄 Processing your query: {user_input}")
-            print("⏳ Please wait while I coordinate with my team...\n")
+            print("⏳ Please wait while I search for images and analyze them...\n")
             
-            result = await run_cosmo_workflow(user_input)
+            result = await run_vlm_workflow(user_input)
             
             # Display results
             if result.get("error"):
                 print(f"❌ Error: {result['error']}")
             else:
                 print("=" * 60)
-                print("🎯 COSMO AGENT RESPONSE:")
+                print("🎯 VLM COSMO AGENT RESPONSE:")
                 print("=" * 60)
                 print(result["final_response"])
                 print("=" * 60)
+                
+                if result["vlm_responses"]:
+                    print("📊 VLM AGENT RESPONSES:")
+                    for i, vlm_resp in enumerate(result["vlm_responses"], 1):
+                        print(f"  {i}. {vlm_resp['agent']}: {vlm_resp['response'][:100]}...")
+                    print("=" * 60)
+                
                 print(f"📊 Events processed: {result['events_processed']}")
-                print(f"⏱️  Status: {result['status']}")
+                print(f"⏱️ Execution time: {result['execution_time']:.2f}s")
                 print()
             
         except KeyboardInterrupt:
-            print("\n\n👋 Goodbye! Thanks for using Cosmo Agent!")
+            print("\n\n👋 Goodbye! Thanks for using VLM Cosmo Agent!")
             break
         except Exception as e:
             print(f"❌ Unexpected error: {str(e)}")
             logger.error(f"Unexpected error in interactive mode: {str(e)}")
 
-# --- Batch processing function ---
-async def batch_process_queries(queries: list[str]) -> list[Dict[str, Any]]:
-    """
-    Process multiple queries in batch mode.
-    
-    Args:
-        queries: List of user queries to process
-        
-    Returns:
-        List of results for each query
-    """
-    results = []
-    
-    for i, query in enumerate(queries, 1):
-        logger.info(f"🔄 Processing query {i}/{len(queries)}: {query}")
-        result = await run_cosmo_workflow(query)
-        results.append(result)
-        
-        # Add a small delay between queries to avoid overwhelming the system
-        await asyncio.sleep(1)
-    
-    return results
-
 # --- Main entry point ---
 async def main():
     """
-    Main entry point for the Cosmo Agent system.
+    Main entry point for the VLM Cosmo Agent system.
     """
-    logger.info("🚀 Starting Cosmo Agent System")
+    logger.info("🚀 Starting VLM Cosmo Agent System")
     
-    # Fixed query for testing
-    fixed_query = "Analyze the recent breakthroughs in quantum computing and their specific applications in modern cryptography and blockchain security"
+    # Test query for VLM workflow
+    test_query = "Tìm cho tôi những hình ảnh về con mèo và cho biết con mèo trong ảnh có màu gì?"
     
-    print(f"🔍 Testing with fixed query: {fixed_query}")
-    print("⏳ Please wait while I coordinate with my team...\n")
+    print(f"🔍 Testing with query: {test_query}")
+    print("⏳ Please wait while I search for images and analyze them...\n")
     
-    # Run the workflow with fixed query
-    result = await run_cosmo_workflow(fixed_query)
+    # Run the workflow with test query
+    result = await run_vlm_workflow(test_query)
     
     # Display results
     if result.get("error"):
         print(f"❌ Error: {result['error']}")
     else:
         print("=" * 60)
-        print("🎯 COSMO AGENT RESPONSE:")
+        print("🎯 VLM COSMO AGENT RESPONSE:")
         print("=" * 60)
         print(result["final_response"])
         print("=" * 60)
+        
+        if result["vlm_responses"]:
+            print("📊 VLM AGENT RESPONSES:")
+            for i, vlm_resp in enumerate(result["vlm_responses"], 1):
+                print(f"  {i}. {vlm_resp['agent']}: {vlm_resp['response'][:100]}...")
+            print("=" * 60)
+        
         print(f"📊 Events processed: {result['events_processed']}")
-        print(f"⏱️  Status: {result['status']}")
+        print(f"⏱️ Execution time: {result['execution_time']:.2f}s")
         print(f"⏰ Start time: {datetime.fromisoformat(result['start_time']).strftime('%H:%M:%S')}")
         print(f"🏁 End time: {datetime.fromisoformat(result['end_time']).strftime('%H:%M:%S')}")
-        print(f"⏱️ Total execution time: {result['execution_time']:.2f} seconds")
-        
-        # Show detailed timing if available
-        if "workflow_timing" in result["session_state"]:
-            timing = result["session_state"]["workflow_timing"]
-            print("\n⏱️ Detailed Timing Breakdown:")
-            print(f"  📋 Step 1 (Task Decomposition): {timing['step1_duration']:.2f}s")
-            print(f"  🔄 Step 2 (Sub-agents Parallel): {timing['step2_duration']:.2f}s")
-            print(f"  🔍 Step 3 (Main Agent Evaluation): {timing['step3_duration']:.2f}s")
-            if timing['step4_duration'] > 0:
-                print(f"  🔄 Step 4 (Retry + Final Eval): {timing['step4_duration']:.2f}s")
-            else:
-                print(f"  ⏭️ Step 4 (Retry): Skipped")
-            print(f"  🏁 Total Workflow Time: {timing['total_time']:.2f}s")
         
         print("\n📋 Final Session State:")
-        # Don't show timing details in session state to avoid clutter
-        session_state_clean = {k: v for k, v in result["session_state"].items() if k != "workflow_timing"}
+        session_state_clean = {k: v for k, v in result["session_state"].items() 
+                             if k not in ["workflow_execution_time"]}
         print(json.dumps(session_state_clean, indent=2, ensure_ascii=False))
         print("=" * 60)
 
