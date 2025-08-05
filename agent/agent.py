@@ -67,7 +67,7 @@ key_manager = ApiKeyManager()
 os.environ['GEMINI_API_KEY'] = key_manager.api_keys[0]
 # Local OpenAI-compatible model configuration
 os.environ['OPENAI_API_KEY'] = "sk-fake-key-for-local-model"  # Cần có API key format hợp lệ cho LiteLLM
-api_base_url = "http://85.167.195.195:34751/v1"
+api_base_url = "http://174.78.228.101:40477/v1"
 
 # Tool setup
 milvus_tool = Api(output_folder="tools_results")
@@ -144,11 +144,12 @@ def create_vlm_agent(agent_id: int):
     """Tạo VLM agent với API key rotation"""
     return create_agent_with_api_key_rotation(
         name=f'VLMAgent{agent_id}',
-        model=LiteLlm(
-            model="hosted_vllm/AIDC-AI/Ovis2-4B", 
-            api_base=api_base_url,
-            api_key="sk-fake-key-for-local-model"
-        ),
+        model = "gemini-2.5-pro",
+        # model=LiteLlm(
+        #     model="hosted_vllm/OpenGVLab/InternVL3-38B", 
+        #     api_base=api_base_url,
+        #     api_key="sk-fake-key-for-local-model"
+        # ),
         agent_id=agent_id + 10,  # Offset để phân bổ key khác với search agents
         description=f"VLM Agent #{agent_id} - Phân tích ảnh và trả lời câu hỏi",
         instruction=prompt.VLM_AGENT_PROMPT,

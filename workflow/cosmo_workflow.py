@@ -1,400 +1,559 @@
+import logging
 import json
-import time
-import asyncio
 import base64
 import os
-from typing import AsyncGenerator, Optional, List, Dict, Any
-from pydantic import PrivateAttr
-from google.adk.agents import BaseAgent, LlmAgent, SequentialAgent
-from google.adk.events import Event
+from typing import AsyncGenerator, List, Dict, Any
+from typing_extensions import override
+
+from google.adk.agents import LlmAgent, BaseAgent
 from google.adk.agents.invocation_context import InvocationContext
 from google.genai import types
+from google.adk.sessions import InMemorySessionService
+from google.adk.runners import Runner
+from google.adk.events import Event
+from pydantic import BaseModel, Field
 
-def _create_branch_ctx_for_vlm_agent(
-    parent_agent: BaseAgent,
-    vlm_agent: BaseAgent,
-    invocation_context: InvocationContext,
-) -> InvocationContext:
-    """Tạo context riêng cho mỗi VLM agent."""
-    invocation_context = invocation_context.model_copy()
-    branch_suffix = f"{parent_agent.name}.{vlm_agent.name}"
-    invocation_context.branch = (
-        f"{invocation_context.branch}.{branch_suffix}"
-        if invocation_context.branch
-        else branch_suffix
-    )
-    return invocation_context
+# Import agents và tools
+from agent.agent import (
+    main_agent, 
+    search_agents, 
+    vlm_agents, 
+    aggregator_agent,
+    key_manager
+)
 
-async def _merge_vlm_agent_runs(agent_runs: list[AsyncGenerator[Event, None]]) -> AsyncGenerator[Event, None]:
-    """Gộp kết quả từ tất cả VLM agents chạy song song."""
-    tasks = [asyncio.create_task(run.__anext__()) for run in agent_runs]
-    pending_tasks = set(tasks)
+# --- Constants ---
+APP_NAME = "cosmo_app"
+USER_ID = "cosmo_user"
+SESSION_ID = "cosmo_session"
 
-    while pending_tasks:
-        done, pending_tasks = await asyncio.wait(
-            pending_tasks, return_when=asyncio.FIRST_COMPLETED
-        )
-        for task in done:
-            try:
-                yield task.result()
-                for i, original in enumerate(tasks):
-                    if task == original:
-                        new_task = asyncio.create_task(agent_runs[i].__anext__())
-                        tasks[i] = new_task
-                        pending_tasks.add(new_task)
-                        break
-            except StopAsyncIteration:
-                continue
+# --- Configure Logging ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-class SearchWorkflow(BaseAgent):
-    """Workflow chạy multiple Search agents song song để tìm ảnh"""
 
-    _output_key: Optional[str] = PrivateAttr(default="all_retrieved_images")
-
-    def __init__(self, name: str, search_agents: List[LlmAgent], output_key: Optional[str] = None):
-        super().__init__(name=name, sub_agents=search_agents)
-        
-        if output_key:
-            self._output_key = output_key
-
-    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        # Lấy task list từ main agent
-        task_plan = ctx.session.state.get("user_query", "")
-        
-        try:
-            if isinstance(task_plan, str):
-                # Remove markdown code blocks if present
-                clean_json = task_plan.strip()
-                if clean_json.startswith('```json'):
-                    clean_json = clean_json[7:]  # Remove ```json
-                if clean_json.endswith('```'):
-                    clean_json = clean_json[:-3]  # Remove ```
-                clean_json = clean_json.strip()
-                task_list = json.loads(clean_json)
-            else:
-                task_list = task_plan
-        except Exception as e:
-            print(f"[SearchWorkflow] Error parsing task plan: {e}")
-            print(f"[SearchWorkflow] Raw task_plan: {task_plan}")
-            return
-            
-        if not isinstance(task_list, list):
-            print(f"[SearchWorkflow] Invalid task list format")
-            return
-            
-        print(f"[SearchWorkflow] Running {len(task_list)} search tasks with {len(self.sub_agents)} search agents")
-        
-        # Map task với agent
-        search_responses = {}
-        agent_runs = []
-        
-        for i, task in enumerate(task_list):
-            if i >= len(self.sub_agents):
-                break
-                
-            search_agent = self.sub_agents[i]
-            query = task.get("query", "")
-            
-            print(f"[SearchWorkflow] Assigning query '{query}' to {search_agent.name}")
-            
-            new_ctx = _create_branch_ctx_for_vlm_agent(self, search_agent, ctx).copy(update={
-                "input": f"Tìm kiếm ảnh cho: {query}"
-            })
-
-            async def track_search_output(agent=search_agent, new_ctx=new_ctx, query=query):
-                async for event in agent.run_async(new_ctx):
-                    if hasattr(event, 'content') and event.content:
-                        search_responses[agent.name] = {
-                            "response": event.content,
-                            "query": query
-                        }
-                    yield event
-
-            agent_runs.append(track_search_output())
-
-        # Chạy tất cả Search agents song song
-        async for event in _merge_vlm_agent_runs(agent_runs):
-            yield event
-
-        # Gom tất cả ảnh từ các search agents
-        all_images = []
-        for agent_name, response in search_responses.items():
-            print(f"[SearchWorkflow] Processing response from {agent_name}")
-            # Search trong session state cho function responses của agent này
-            agent_images = []
-            
-            # Tìm trong session events cho function responses
-            for event in ctx.session.events:
-                if hasattr(event, 'author') and event.author == agent_name:
-                    if hasattr(event, 'content') and event.content and hasattr(event.content, 'parts'):
-                        for part in event.content.parts:
-                            if hasattr(part, 'function_response') and part.function_response:
-                                if part.function_response.name == 'image_search':
-                                    response_data = part.function_response.response
-                                    if isinstance(response_data, dict) and 'images' in response_data:
-                                        images = response_data['images']
-                                        agent_images.extend(images)
-                                        print(f"[SearchWorkflow] Got {len(images)} images from {agent_name}")
-            
-            all_images.extend(agent_images)
-
-        # Lưu tất cả ảnh vào session state
-        if self._output_key:
-            ctx.session.state[self._output_key] = {
-                "images": all_images,
-                "total_found": len(all_images),
-                "search_metadata": {
-                    "search_agents_used": len(search_responses),
-                    "queries": [resp["query"] for resp in search_responses.values()]
-                }
-            }
-            print(f"[SearchWorkflow] Saved {len(all_images)} total images to session state")
-
-class VLMWorkflow(BaseAgent):
-    """Workflow chạy K VLM agents song song để phân tích ảnh và trả lời câu hỏi"""
-
-    _output_key: Optional[str] = PrivateAttr(default="vlm_responses")
-
-    def __init__(self, name: str, vlm_agents: List[LlmAgent], output_key: Optional[str] = None):
-        super().__init__(name=name, sub_agents=vlm_agents)
-        
-        if output_key:
-            self._output_key = output_key
-
-    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        # Lấy tất cả ảnh từ search workflow
-        all_retrieved_images = ctx.session.state.get("all_retrieved_images", {})
-        user_query = ctx.session.state.get("original_user_query", "")
-        
-        if not all_retrieved_images or "images" not in all_retrieved_images:
-            print("[VLMWorkflow] No images found from search agents!")
-            # Yield a message event instead of returning
-            from google.genai.types import Event
-            yield Event(content="[VLMWorkflow] No images found - skipping VLM analysis")
-            return
-            
-        images = all_retrieved_images["images"]
-        if not images or len(images) == 0:
-            print("[VLMWorkflow] Empty images list from search agents!")
-            # Yield a message event instead of returning  
-            from google.genai.types import Event
-            yield Event(content="[VLMWorkflow] Empty images list - skipping VLM analysis")
-            return
-            
-        print(f"[VLMWorkflow] Processing {len(images)} images with {len(self.sub_agents)} VLM agents")
-        
-        # Phân chia ảnh cho các VLM agents (phân đều tất cả ảnh)
-        vlm_responses = {}
-        agent_runs = []
-        
-        # Phân chia ảnh đều cho các VLM agents
-        images_per_agent = len(images) // len(self.sub_agents)
-        remaining_images = len(images) % len(self.sub_agents)
-        
-        print(f"[VLMWorkflow] Distribution: {len(images)} images / {len(self.sub_agents)} agents = {images_per_agent} per agent, {remaining_images} remaining")
-        
-        image_index = 0
-        for i, vlm_agent in enumerate(self.sub_agents):
-            # Tính số ảnh cho agent này
-            num_images_for_agent = images_per_agent
-            if i < remaining_images:  # Phân ảnh dư cho các agent đầu tiên
-                num_images_for_agent += 1
-            
-            if num_images_for_agent == 0:
-                print(f"[VLMWorkflow] No images assigned to {vlm_agent.name}")
-                continue
-            
-            # Lấy ảnh cho agent này
-            agent_images = images[image_index:image_index + num_images_for_agent]
-            image_index += num_images_for_agent
-            
-            print(f"[VLMWorkflow] Agent {i+1} ({vlm_agent.name}): {num_images_for_agent} images (index {image_index-num_images_for_agent} to {image_index-1})")
-            print(f"[VLMWorkflow] Image IDs for {vlm_agent.name}: {[img['id'] for img in agent_images]}")
-            
-            # Tạo content với tất cả ảnh cho agent này
-            text_content = f"""
-Câu hỏi gốc từ user: {user_query}
-
-Bạn được giao {len(agent_images)} ảnh để phân tích:
-"""
-            
-            # Thêm thông tin từng ảnh
-            for j, img in enumerate(agent_images):
-                text_content += f"""
-Ảnh {j+1}:
-- ID: {img['id']}
-- Đường dẫn: {img['path']}
-- Mô tả: {img['description']}
-- Điểm relevance: {img['relevance_score']}
-"""
-            
-            text_content += f"\n\nHãy phân tích tất cả ảnh được giao và trả lời câu hỏi gốc của user dựa trên nội dung ảnh."
-            
-            # DEBUG: Kiểm tra xem có ảnh nào để load không
-            valid_images = []
-            for assigned_image in agent_images:
-                image_path = assigned_image['path']
-                if os.path.exists(image_path):
-                    try:
-                        with open(image_path, 'rb') as f:
-                            image_data = f.read()
-                        
-                        # Encode base64 để debug
-                        image_b64 = base64.b64encode(image_data).decode('utf-8')
-                        
-                        valid_images.append({
-                            'id': assigned_image['id'],
-                            'path': image_path,
-                            'data': image_data,
-                            'size': len(image_data)
-                        })
-                        print(f"[VLMWorkflow] Loaded image {assigned_image['id']}: {len(image_data)} bytes")
-                    except Exception as e:
-                        print(f"[VLMWorkflow] Error loading image {image_path}: {e}")
-                else:
-                    print(f"[VLMWorkflow] Image file not found: {image_path}")
-            
-            if not valid_images:
-                print(f"[VLMWorkflow] WARNING: No valid images for {vlm_agent.name}!")
-                # Vẫn tạo context với text thôi
-                new_ctx = _create_branch_ctx_for_vlm_agent(self, vlm_agent, ctx).copy(update={
-                    "input": text_content + "\n\n[ERROR: Không có ảnh hợp lệ để phân tích]",
-                    "assigned_images": agent_images
-                })
-            else:
-                # Tạo multimodal content với Gemini format
-                content_parts = [types.Part(text=text_content)]
-                
-                # Thêm từng ảnh vào content parts
-                for img in valid_images:
-                    # Xác định mime type
-                    if img['path'].lower().endswith('.png'):
-                        mime_type = "image/png"
-                    elif img['path'].lower().endswith(('.jpg', '.jpeg')):
-                        mime_type = "image/jpeg"
-                    else:
-                        mime_type = "image/png"
-                    
-                    content_parts.append(types.Part(
-                        inline_data=types.Blob(
-                            mime_type=mime_type,
-                            data=img['data']
-                        )
-                    ))
-                    print(f"[VLMWorkflow] Added {img['id']} ({mime_type}, {img['size']} bytes) to {vlm_agent.name}")
-                
-                # Tạo complete multimodal content
-                multimodal_content = types.Content(
-                    role='user',
-                    parts=content_parts
-                )
-                
-                print(f"[VLMWorkflow] Created multimodal content: {len(content_parts)} parts (1 text + {len(valid_images)} images)")
-                
-                new_ctx = _create_branch_ctx_for_vlm_agent(self, vlm_agent, ctx).copy(update={
-                    "input": multimodal_content,  # Truyền complete multimodal content
-                    "assigned_images": agent_images,
-                    "image_count": len(valid_images)
-                })
-
-            async def track_vlm_output(agent=vlm_agent, new_ctx=new_ctx, agent_images=agent_images):
-                async for event in agent.run_async(new_ctx):
-                    if hasattr(event, 'content') and event.content:
-                        vlm_responses[agent.name] = {
-                            "response": event.content,
-                            "image_ids": [img["id"] for img in agent_images],
-                            "num_images": len(agent_images)
-                        }
-                    yield event
-
-            agent_runs.append(track_vlm_output())
-
-        # Chạy tất cả VLM agents song song
-        async for event in _merge_vlm_agent_runs(agent_runs):
-            yield event
-
-        # Lưu kết quả vào session state
-        if self._output_key:
-            ctx.session.state[self._output_key] = vlm_responses
-            print(f"[VLMWorkflow] Saved {len(vlm_responses)} VLM responses to session state")
-
-class CosmoWorkflow(BaseAgent):
+# --- Custom Orchestrator Agent ---
+class CosmoFlowAgent(BaseAgent):
     """
-    New VLM Workflow: Main Agent -> Search Workflow -> VLM Workflow -> Aggregator
+    Custom agent for Cosmo workflow - tìm kiếm ảnh và phân tích VLM.
+
+    Flow: User Query → Main Agent → Search Agents (parallel) → VLM Agents → Aggregator Agent
     """
-    
+
+    # --- Field Declarations for Pydantic ---
+    main_agent: LlmAgent
+    search_agents: List[LlmAgent]
+    vlm_agents: List[LlmAgent]
+    aggregator_agent: LlmAgent
+
+    # model_config allows setting Pydantic configurations
+    model_config = {"arbitrary_types_allowed": True}
+
     def __init__(
         self,
         name: str,
         main_agent: LlmAgent,
         search_agents: List[LlmAgent],
         vlm_agents: List[LlmAgent],
-        aggregator_agent: LlmAgent
+        aggregator_agent: LlmAgent,
     ):
-        # Store agents for internal use but DON'T pass to BaseAgent
-        self._main_agent = main_agent
-        self._search_agents = search_agents  
-        self._vlm_agents = vlm_agents
-        self._aggregator_agent = aggregator_agent
-        # Tạo search workflow
-        search_workflow = SearchWorkflow(
-            name="SearchWorkflow", 
-            search_agents=self._search_agents,
-            output_key="all_retrieved_images"
-        )
-        
-        # Tạo VLM workflow
-        vlm_workflow = VLMWorkflow(
-            name="VLMWorkflow", 
-            vlm_agents=self._vlm_agents,
-            output_key="vlm_responses"
-        )
-        
-        # Tạo sequential workflow
-        sequential_workflow = SequentialAgent(
-            name="MainWorkflow",
-            sub_agents=[
-                self._main_agent,           # Bước 1: Phân tích và chia task
-                search_workflow,            # Bước 2: Chạy 2-3 Search agents song song
-                vlm_workflow,               # Bước 3: Chạy K VLM agents với tất cả ảnh
-                self._aggregator_agent      # Bước 4: Tổng hợp kết quả cuối cùng
-            ]
-        )
-        
-        # ONLY pass sequential_workflow as sub_agent to BaseAgent
-        super().__init__(name=name, sub_agents=[sequential_workflow])
+        """
+        Initializes the CosmoFlowAgent.
 
-    async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        """Chạy workflow chính"""
-        print(f"[{self.name}] Starting New VLM workflow...")
+        Args:
+            name: The name of the agent.
+            main_agent: Agent để phân tích query và chia task
+            search_agents: List các Search Agents để tìm ảnh
+            vlm_agents: List các VLM Agents để phân tích ảnh
+            aggregator_agent: Agent để tổng hợp kết quả cuối cùng
+        """
+        # Define the sub_agents list for the framework
+        sub_agents_list = [main_agent] + search_agents + vlm_agents + [aggregator_agent]
+
+        # Pydantic will validate and assign them based on the class annotations.
+        super().__init__(
+            name=name,
+            main_agent=main_agent,
+            search_agents=search_agents,
+            vlm_agents=vlm_agents,
+            aggregator_agent=aggregator_agent,
+            sub_agents=sub_agents_list,
+        )
+
+    @override
+    async def _run_async_impl(
+        self, ctx: InvocationContext
+    ) -> AsyncGenerator[Event, None]:
+        """
+        Implements the custom orchestration logic for the Cosmo workflow.
+        """
+        logger.info(f"[{self.name}] Starting Cosmo workflow.")
         
-        # Lưu câu hỏi gốc để VLM agents sử dụng
-        original_query = None
-        for event in ctx.session.events:
-            if hasattr(event, 'content') and event.content and event.content.parts:
-                for part in event.content.parts:
-                    if hasattr(part, 'text') and part.text:
-                        original_query = part.text
-                        break
-                if original_query:
+        # Lấy user query từ input content
+        user_input = self._extract_user_input(ctx)
+        logger.info(f"[{self.name}] User Query: {user_input}")
+
+        # Store user query in session
+        ctx.session.state["user_query"] = user_input
+
+        try:
+            # Step 1: Main Agent phân tích và chia task
+            logger.info(f"[{self.name}] Step 1: Main Agent analyzing query...")
+            search_tasks = await self._step1_main_agent_analysis_sync(ctx, user_input)
+
+            # Step 2: Search Agents tìm kiếm ảnh song song
+            logger.info(f"[{self.name}] Step 2: Search Agents working in parallel...")
+            all_images = await self._step2_parallel_search_sync(ctx, search_tasks, user_input)
+
+            # Step 3: VLM Agents phân tích ảnh
+            logger.info(f"[{self.name}] Step 3: VLM Agents analyzing images...")  
+            vlm_results = await self._step3_vlm_analysis_sync(ctx, user_input, all_images)
+
+            # Step 4: Aggregator tổng hợp kết quả
+            logger.info(f"[{self.name}] Step 4: Aggregating final results...")
+            final_answer = await self._step4_aggregate_results_sync(ctx, user_input, vlm_results)
+
+            # Store final answer
+            ctx.session.state["final_answer"] = final_answer
+            
+            # Yield final response event
+            final_content = types.Content(
+                role='assistant',
+                parts=[types.Part(text=final_answer)]
+            )
+            
+            final_event = Event(
+                author=self.name,
+                content=final_content
+            )
+            
+            yield final_event
+            
+            logger.info(f"[{self.name}] Cosmo workflow completed successfully.")
+
+        except Exception as e:
+            logger.error(f"[{self.name}] Workflow error: {str(e)}")
+            error_content = types.Content(
+                role='assistant',
+                parts=[types.Part(text=f"Xin lỗi, có lỗi xảy ra: {str(e)}")]
+            )
+            error_event = Event(
+                author=self.name,
+                content=error_content
+            )
+            yield error_event
+
+    def _extract_user_input(self, ctx: InvocationContext) -> str:
+        """Extract user input từ context"""
+        if hasattr(ctx, 'request') and ctx.request and ctx.request.content:
+            if ctx.request.content.parts:
+                return ctx.request.content.parts[0].text
+        return ctx.session.state.get("user_query", "")
+
+    async def _step1_main_agent_analysis_sync(self, ctx: InvocationContext, user_query: str) -> List[Dict[str, str]]:
+        """
+        Step 1: Main Agent phân tích câu hỏi và chia thành sub-tasks
+        """
+        logger.info(f"[{self.name}] Main Agent analyzing and breaking down the query...")
+        
+        try:
+            # Gọi main agent - giới hạn events
+            main_response = ""
+            event_count = 0
+            max_main_events = 5  # Giới hạn cho Main Agent
+            
+            async for event in self.main_agent.run_async(ctx):
+                event_count += 1
+                logger.info(f"[{self.name}] Main Agent Event #{event_count}: {event.model_dump_json(indent=2, exclude_none=True)}")
+                if hasattr(event, 'content') and event.content and event.content.parts:
+                    if event.content.parts[0].text:
+                        main_response = event.content.parts[0].text
+                        break  # Break ngay khi có response
+                
+                if event_count >= max_main_events:
+                    logger.warning(f"[{self.name}] Main Agent: Reached max events limit")
                     break
-        
-        if original_query:
-            ctx.session.state["original_user_query"] = original_query
-            print(f"[{self.name}] Saved original query: {original_query}")
-        
-        start_time = time.time()
-        
-        # Chạy sequential workflow (lấy từ sub_agents[0])
-        async for event in self.sub_agents[0].run_async(ctx):
-            yield event
-        
-        end_time = time.time()
-        execution_time = end_time - start_time
-        
-        print(f"[{self.name}] New VLM workflow completed in {execution_time:.2f}s")
-        
-        # Lưu thời gian thực hiện
-        ctx.session.state["workflow_execution_time"] = execution_time
 
-    
+            # Parse JSON response từ main agent output
+            main_output = main_response or user_query
+            if isinstance(main_output, str):
+                search_tasks_str = main_output
+            else:
+                search_tasks_str = str(main_output)
+            
+            logger.info(f"[{self.name}] Raw main agent response: {search_tasks_str}")
+            
+            # Clean và parse JSON
+            search_tasks_str = search_tasks_str.strip()
+            if search_tasks_str.startswith('```json'):
+                search_tasks_str = search_tasks_str[7:-3]
+            elif search_tasks_str.startswith('```'):
+                search_tasks_str = search_tasks_str[3:-3]
+                
+            search_tasks = json.loads(search_tasks_str)
+            
+            logger.info(f"[{self.name}] Created {len(search_tasks)} search tasks")
+            for i, task in enumerate(search_tasks, 1):
+                logger.info(f"[{self.name}]   {i}. {task['agent']}: {task['query']}")
+                
+            return search_tasks
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"[{self.name}] JSON parsing error: {e}")
+            # Fallback: tạo search tasks mặc định
+            return [
+                {"agent": "SearchAgent1", "query": user_query},
+                {"agent": "SearchAgent2", "query": f"related to {user_query}"},
+                {"agent": "SearchAgent3", "query": f"information about {user_query}"}
+            ]
+        except Exception as e:
+            logger.error(f"[{self.name}] Main agent error: {e}")
+            raise
+
+    async def _step2_parallel_search_sync(self, ctx: InvocationContext, search_tasks: List[Dict[str, str]], user_query: str) -> List[Dict[str, Any]]:
+        """
+        Step 2: Chạy 3 Search Agents song song
+        """
+        logger.info(f"[{self.name}] Running {len(self.search_agents)} Search Agents in parallel...")
+        
+        all_images = []
+        
+        # Chạy search agents song song  
+        import asyncio
+        async def run_search_agent(agent, task, agent_idx):
+            try:
+                # Create input cho search agent - chỉ query đơn giản
+                input_text = task['query']
+                
+                # Gọi search agent với input đơn giản
+                search_results = []
+                event_count = 0
+                max_events = 20  # Giới hạn số events để tránh lặp vô tận
+                
+                async for event in agent.run_async(ctx):
+                    event_count += 1
+                    logger.info(f"[{self.name}] SearchAgent{agent_idx} Event #{event_count}: {event.model_dump_json(indent=2, exclude_none=True)}")
+                    
+                    # Kiểm tra function response có chứa search results
+                    if (hasattr(event, 'content') and event.content and event.content.parts):
+                        for part in event.content.parts:
+                            if hasattr(part, 'function_response') and part.function_response:
+                                response_data = part.function_response.response
+                                if isinstance(response_data, dict) and "images" in response_data:
+                                    search_results = response_data["images"]
+                                    logger.info(f"[{self.name}] SearchAgent{agent_idx}: Found {len(search_results)} images in function response")
+                                    return search_results  # Return ngay khi có kết quả
+                    
+                    # Giới hạn số events để tránh lặp vô tận
+                    if event_count >= max_events:
+                        logger.warning(f"[{self.name}] SearchAgent{agent_idx}: Reached max events limit ({max_events})")
+                        break
+                        
+                logger.info(f"[{self.name}] SearchAgent{agent_idx}: Found {len(search_results)} images total")
+                return search_results
+                
+            except Exception as e:
+                logger.error(f"[{self.name}] SearchAgent{agent_idx} error: {e}")
+                return []
+        
+        # Chạy tất cả search agents song song
+        search_tasks_limited = search_tasks[:len(self.search_agents)]  # Giới hạn số task
+        search_coroutines = [
+            run_search_agent(self.search_agents[i], task, i+1) 
+            for i, task in enumerate(search_tasks_limited)
+        ]
+        
+        search_results_list = await asyncio.gather(*search_coroutines, return_exceptions=True)
+        
+        # Tổng hợp kết quả
+        for i, result in enumerate(search_results_list):
+            if isinstance(result, Exception):
+                logger.error(f"[{self.name}] SearchAgent{i+1} failed: {result}")
+            elif isinstance(result, list):
+                all_images.extend(result)
+        
+        logger.info(f"[{self.name}] Total images found: {len(all_images)}")
+        return all_images
+
+    async def _step3_vlm_analysis_sync(self, ctx: InvocationContext, user_query: str, all_images: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Step 3: VLM Agents phân tích ảnh song song
+        """
+        logger.info(f"[{self.name}] VLM Agents processing {len(all_images)} images in parallel...")
+        
+        if not all_images:
+            logger.warning(f"[{self.name}] No images to process")
+            return []
+        
+        # Chia ảnh cho các VLM agents
+        image_batches = self._distribute_images_to_agents(all_images)
+        
+        all_vlm_results = []
+        
+        # Chạy VLM agents song song
+        import asyncio
+        async def run_vlm_agent_batch(agent, images_batch, agent_idx):
+            batch_results = []
+            
+            for i, image in enumerate(images_batch):
+                try:
+                    # Chuẩn bị input cho VLM agent với ảnh
+                    vlm_input = await self._prepare_vlm_input_with_image(user_query, image)
+                    
+                    logger.info(f"[{self.name}] {agent.name} processing image {image.get('id', f'img_{i}')}...")
+                    
+                    # Tạo content với cả text và ảnh
+                    content_parts = [types.Part(text=vlm_input["text_input"])]
+                    
+                    # Thêm ảnh nếu có
+                    if "image_part" in vlm_input:
+                        content_parts.append(vlm_input["image_part"])
+                        logger.info(f"[{self.name}] Added image to VLM input: {image.get('id')}")
+                    
+                    # Tạo content với ảnh
+                    vlm_content = types.Content(
+                        role='user',
+                        parts=content_parts
+                    )
+                    
+                    # Tạo session runner cho VLM agent với ảnh
+                    from google.adk.runners import Runner
+                    from google.adk.sessions import InMemorySessionService
+                    
+                    # Tạo session service cho VLM nếu cần
+                    vlm_session_service = InMemorySessionService()
+                    
+                    # Tạo runner cho VLM agent này
+                    vlm_runner = Runner(
+                        agent=agent,
+                        app_name="CosmoVLM",
+                        session_service=vlm_session_service
+                    )
+                    
+                    # Gọi VLM agent với ảnh - giới hạn events
+                    vlm_response = ""
+                    event_count = 0
+                    max_vlm_events = 10  # Giới hạn cho VLM
+                    
+                    # Tạo session riêng cho VLM
+                    vlm_session_id = f"vlm_{agent.name}_{image.get('id', 'unknown')}"
+                    vlm_user_id = "vlm_user"
+                    
+                    # Tạo session trước
+                    await vlm_session_service.create_session(
+                        app_name="CosmoVLM",
+                        user_id=vlm_user_id,
+                        session_id=vlm_session_id,
+                        state={}
+                    )
+                    
+                    # Sử dụng runner để gọi agent với content có ảnh
+                    events = vlm_runner.run_async(
+                        user_id=vlm_user_id,
+                        session_id=vlm_session_id,
+                        new_message=vlm_content
+                    )
+                    
+                    async for event in events:
+                        event_count += 1
+                        if hasattr(event, 'content') and event.content and event.content.parts:
+                            if event.content.parts[0].text:
+                                vlm_response = event.content.parts[0].text
+                                break  # Break ngay khi có text response
+                        
+                        if event_count >= max_vlm_events:
+                            logger.warning(f"[{self.name}] {agent.name}: Reached max VLM events limit")
+                            break
+                    
+                    batch_results.append({
+                        "image_id": image.get("id", f"batch_{agent_idx}_img_{i}"),
+                        "image_path": image.get("path", ""),
+                        "vlm_agent": agent.name,
+                        "response": vlm_response,
+                        "relevance_score": image.get("relevance_score", 0.0)
+                    })
+                    
+                    logger.info(f"[{self.name}] {image.get('id')}: {vlm_response[:50]}...")
+                    
+                except Exception as e:
+                    logger.error(f"[{self.name}] Error processing {image.get('id', f'img_{i}')}: {e}")
+                    batch_results.append({
+                        "image_id": image.get("id", f"batch_{agent_idx}_img_{i}"),
+                        "image_path": image.get("path", ""),
+                        "vlm_agent": agent.name,
+                        "response": f"Lỗi xử lý ảnh: {str(e)}",
+                        "relevance_score": image.get("relevance_score", 0.0)
+                    })
+            
+            logger.info(f"[{self.name}] {agent.name} completed batch: {len(batch_results)}/{len(images_batch)} processed")
+            return batch_results
+        
+        # Chạy tất cả VLM agents song song
+        vlm_coroutines = [
+            run_vlm_agent_batch(self.vlm_agents[i], batch, i+1) 
+            for i, batch in enumerate(image_batches) if batch
+        ]
+        
+        vlm_results_list = await asyncio.gather(*vlm_coroutines, return_exceptions=True)
+        
+        # Tổng hợp kết quả
+        for result in vlm_results_list:
+            if isinstance(result, Exception):
+                logger.error(f"[{self.name}] VLM batch failed: {result}")
+            elif isinstance(result, list):
+                all_vlm_results.extend(result)
+        
+        logger.info(f"[{self.name}] VLM processing completed: {len(all_vlm_results)} total results")
+        return all_vlm_results
+
+    def _distribute_images_to_agents(self, all_images: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+        """
+        Chia ảnh cho các VLM agents
+        """
+        num_agents = len(self.vlm_agents)
+        num_images = len(all_images)
+        
+        # Tính toán phân bổ
+        base_batch_size = num_images // num_agents
+        remainder = num_images % num_agents
+        
+        image_batches = []
+        start_idx = 0
+        
+        for i in range(num_agents):
+            batch_size = base_batch_size + (1 if i < remainder else 0)
+            end_idx = start_idx + batch_size
+            
+            batch = all_images[start_idx:end_idx]
+            image_batches.append(batch)
+            
+            if batch:
+                logger.info(f"[{self.name}] {self.vlm_agents[i].name}: Assigned {len(batch)} images")
+            
+            start_idx = end_idx
+        
+        return image_batches
+
+    async def _prepare_vlm_input_with_image(self, user_query: str, image: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Chuẩn bị input cho VLM agent - bao gồm text và ảnh theo Google ADK format
+        """
+        # Text input cho VLM
+        text_input = f"""User query: {user_query}
+Image ID: {image.get('id', 'unknown')}
+Image description: {image.get('description', '')}
+Relevance score: {image.get('relevance_score', 0.0)}
+
+Please analyze this image and answer the user's question."""
+        
+        vlm_input = {
+            "text_input": text_input,
+            "image_id": image.get("id", "unknown"),
+            "user_query": user_query
+        }
+        
+        # Xử lý ảnh - đọc và encode base64 cho Google ADK
+        image_path = image.get("path")
+        if image_path and os.path.exists(image_path):
+            try:
+                with open(image_path, "rb") as f:
+                    image_data = f.read()
+                    # Google ADK format cho ảnh
+                    image_mime_type = "image/png"  # hoặc detect từ extension
+                    vlm_input["image_part"] = types.Part(
+                        inline_data=types.Blob(
+                            mime_type=image_mime_type,
+                            data=image_data
+                        )
+                    )
+                    
+                logger.info(f"[{self.name}] Image prepared: {image_path} ({len(image_data)} bytes)")
+                
+            except Exception as e:
+                logger.error(f"[{self.name}] Error reading image {image_path}: {e}")
+                vlm_input["image_error"] = f"Cannot read image: {e}"
+        else:
+            logger.warning(f"[{self.name}] Image path not found: {image_path}")
+            vlm_input["image_error"] = "Image file not found"
+        
+        return vlm_input
+
+    async def _step4_aggregate_results_sync(self, ctx: InvocationContext, user_query: str, vlm_results: List[Dict[str, Any]]) -> str:
+        """
+        Step 4: Aggregator tổng hợp kết quả cuối cùng
+        """
+        logger.info(f"[{self.name}] Aggregator processing final results...")
+        
+        try:
+            # Chuẩn bị input cho aggregator
+            aggregator_input = f"""User query: {user_query}
+Total VLM results: {len(vlm_results)}
+
+VLM Analysis Results:
+{json.dumps(vlm_results, indent=2, ensure_ascii=False)}
+
+Please provide a comprehensive answer based on the VLM analysis results."""
+            
+            # Set input vào session
+            ctx.session.state["aggregator_input"] = aggregator_input
+            
+            # Gọi aggregator agent - giới hạn events
+            final_answer = ""
+            event_count = 0
+            max_aggregator_events = 5  # Giới hạn cho Aggregator
+            
+            async for event in self.aggregator_agent.run_async(ctx):
+                event_count += 1
+                logger.info(f"[{self.name}] Aggregator Event #{event_count}: {event.model_dump_json(indent=2, exclude_none=True)}")
+                if hasattr(event, 'content') and event.content and event.content.parts:
+                    if event.content.parts[0].text:
+                        final_answer = event.content.parts[0].text
+                        break  # Break ngay khi có final answer
+                
+                if event_count >= max_aggregator_events:
+                    logger.warning(f"[{self.name}] Aggregator: Reached max events limit")
+                    break
+            
+            logger.info(f"[{self.name}] Final answer generated ({len(final_answer)} chars)")
+            return final_answer
+            
+        except Exception as e:
+            logger.error(f"[{self.name}] Aggregator error: {e}")
+            # Fallback: tự tổng hợp
+            return self._fallback_aggregation(user_query, vlm_results)
+
+    def _fallback_aggregation(self, user_query: str, vlm_results: List[Dict[str, Any]]) -> str:
+        """
+        Tổng hợp dự phòng khi aggregator lỗi
+        """
+        if not vlm_results:
+            return "Xin lỗi, không tìm thấy thông tin liên quan đến câu hỏi của bạn."
+        
+        # Lọc các kết quả có ý nghĩa
+        meaningful_results = [
+            result for result in vlm_results 
+            if result["response"] and "không biết" not in result["response"].lower()
+        ]
+        
+        if not meaningful_results:
+            return "Tôi không thể tìm thấy thông tin phù hợp để trả lời câu hỏi này."
+        
+        # Tổng hợp câu trả lời
+        answer_parts = [f"Dựa trên {len(meaningful_results)} ảnh được phân tích:"]
+        
+        for i, result in enumerate(meaningful_results[:3], 1):  # Lấy 3 kết quả tốt nhất
+            answer_parts.append(f"{i}. {result['response']} (từ {result['image_id']})")
+        
+        return "\n".join(answer_parts)
+
+
+# --- Create the CosmoFlowAgent instance ---
+cosmo_flow_agent = CosmoFlowAgent(
+    name="CosmoFlowAgent",
+    main_agent=main_agent,
+    search_agents=search_agents,
+    vlm_agents=vlm_agents,
+    aggregator_agent=aggregator_agent,
+)
+
+logger.info(f"✅ CosmoFlowAgent initialized with {len(search_agents)} search agents and {len(vlm_agents)} VLM agents")
