@@ -175,7 +175,7 @@ class CosmoFlowAgent(BaseAgent):
                     break
 
             # Parse JSON response từ main agent output
-            main_output = main_response or user_query
+            main_output = main_response 
             if isinstance(main_output, str):
                 search_tasks_str = main_output
             else:
@@ -223,7 +223,7 @@ class CosmoFlowAgent(BaseAgent):
         async def run_search_agent(agent, task, agent_idx):
             try:
                 # Create input cho search agent - chỉ query đơn giản
-                input_text = task['query']
+                ctx.session.state["search_query"] = task['query']
                 
                 # Gọi search agent với input đơn giản
                 search_results = []
@@ -497,12 +497,47 @@ Please provide a comprehensive answer based on the VLM analysis results."""
             # Set input vào session
             ctx.session.state["aggregator_input"] = aggregator_input
             
-            # Gọi aggregator agent - giới hạn events
+            # Store VLM results trong session state để aggregator có thể truy cập
+            ctx.session.state["vlm_results"] = vlm_results
+            ctx.session.state["user_query"] = user_query
+            
+            # Gọi aggregator agent trực tiếp với aggregator_input
+            from google.genai import types
+            from google.adk.runners import Runner
+            from google.adk.sessions import InMemorySessionService
+            
+            # Tạo content mới với aggregator_input
+            aggregator_content = types.Content(
+                role='user',
+                parts=[types.Part(text=aggregator_input)]
+            )
+            
+            # Tạo runner mới cho aggregator với content chứa VLM results
+            session_service = InMemorySessionService()
+            temp_session = await session_service.create_session(
+                app_name="cosmo_temp", 
+                user_id="temp_user", 
+                session_id="temp_session"
+            )
+            
+            runner = Runner(
+                agent=self.aggregator_agent,
+                app_name="cosmo_temp",
+                session_service=session_service
+            )
+            
+            # Gọi aggregator với content chứa VLM results
             final_answer = ""
             event_count = 0
             max_aggregator_events = 5  # Giới hạn cho Aggregator
             
-            async for event in self.aggregator_agent.run_async(ctx):
+            events = runner.run_async(
+                user_id="temp_user",
+                session_id="temp_session", 
+                new_message=aggregator_content
+            )
+            
+            async for event in events:
                 event_count += 1
                 logger.info(f"[{self.name}] Aggregator Event #{event_count}: {event.model_dump_json(indent=2, exclude_none=True)}")
                 if hasattr(event, 'content') and event.content and event.content.parts:

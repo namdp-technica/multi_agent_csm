@@ -4,7 +4,7 @@ import os
 from typing import Dict, Any
 def agent_tool(func):
     return func
-API_URL = "http://45.18.173.26:43257/search_default_base64"
+API_URL = "http://178.164.41.219:41033/search_default_base64"
 class Api:
     
     def __init__(self, output_folder: str = "results"):

@@ -3,7 +3,7 @@ import time
 import threading
 from google.adk.agents import LlmAgent 
 from google.adk.models.lite_llm import LiteLlm
-
+from google.genai import types
 from tools import Api
 import prompt
 
@@ -67,7 +67,7 @@ key_manager = ApiKeyManager()
 os.environ['GEMINI_API_KEY'] = key_manager.api_keys[0]
 # Local OpenAI-compatible model configuration
 os.environ['OPENAI_API_KEY'] = "sk-fake-key-for-local-model"  # Cần có API key format hợp lệ cho LiteLLM
-api_base_url = "http://174.78.228.101:40477/v1"
+api_base_url = "http://108.172.120.126:31404/v1"
 
 # Tool setup
 milvus_tool = Api(output_folder="tools_results")
@@ -77,7 +77,7 @@ tool_image_search = milvus_tool.image_search
 # Dynamic API Key Setting
 # ===============================
 def create_agent_with_api_key_rotation(name: str, model: str, agent_id: int, description: str, 
-                                     instruction: str, tools=None, output_key=None):
+                                     instruction: str, tools=None, output_key=None, temperature= None):
     """Tạo agent với API key rotation qua callbacks"""
     
     assigned_key = key_manager.get_key_for_agent(agent_id)
@@ -96,6 +96,7 @@ def create_agent_with_api_key_rotation(name: str, model: str, agent_id: int, des
         'model': model,
         'description': description,
         'instruction': instruction,
+        'generate_content_config': types.GenerateContentConfig(temperature=temperature),
         'before_agent_callback': before_callback,
         'after_agent_callback': after_callback
     }
@@ -113,10 +114,11 @@ def create_agent_with_api_key_rotation(name: str, model: str, agent_id: int, des
 main_agent = create_agent_with_api_key_rotation(
     name="MainCoordinator",
     model="gemini-2.5-pro",
+    temperature=0.2,
     agent_id=0,
     description="Điều phối tìm kiếm ảnh và phân tích VLM",
     instruction=prompt.MAIN_AGENT_PROMPT,
-    output_key="user_query"
+    output_key="task_results"
 )
 
 # ===============================
@@ -146,7 +148,7 @@ def create_vlm_agent(agent_id: int):
         name=f'VLMAgent{agent_id}',
         model = "gemini-2.5-pro",
         # model=LiteLlm(
-        #     model="hosted_vllm/OpenGVLab/InternVL3-38B", 
+        #     model="hosted_vllm/OpenGVLab/InternVL3-8B", 
         #     api_base=api_base_url,
         #     api_key="sk-fake-key-for-local-model"
         # ),
@@ -165,7 +167,9 @@ vlm_agents = [create_vlm_agent(i) for i in range(1, 6)]  # 5 VLM agents
 aggregator_agent = create_agent_with_api_key_rotation(
     name="AggregatorAgent",
     model="gemini-2.5-pro",
-    agent_id=99,  # ID cao để đảm bảo sử dụng key khác
+    agent_id=99, 
+    temperature=0.2,
+    # ID cao để đảm bảo sử dụng key khác
     description="Tổng hợp kết quả từ VLM agents và trả lời cuối cùng",
     instruction=prompt.AGGREGATOR_AGENT_PROMPT
 )
