@@ -14,7 +14,7 @@ from google.adk.events import Event
 from pydantic import BaseModel, Field
 
 # Import agents và tools
-from multi_agent.agent import main_agent, search_agents, vlm_agents, aggregator_agent
+from ..agent import main_agent, search_agents, vlm_agents, aggregator_agent
 
 # --- Constants ---
 APP_NAME = "cosmo_app"
