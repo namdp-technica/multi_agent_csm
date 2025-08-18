@@ -1,26 +1,33 @@
-#!/usr/bin/env python3
-"""
-Main entry point for Cosmo workflow
-Chạy hệ thống tìm kiếm ảnh và phân tích VLM
-"""
-
+import os
 import asyncio
 import logging
+from dotenv import load_dotenv
 from google.adk.sessions import InMemorySessionService
 from google.adk.runners import Runner
 from google.genai import types
-
-from workflow.cosmo_workflow import cosmo_flow_agent
+from workflow.cosmo_workflow import CosmoFlowAgent
+from agent.agent import main_agent, search_agents, vlm_agents, aggregator_agent
+from utils.helper_workflow import load_config
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config", "config.yaml")
+config = load_config(config_path=CONFIG_PATH)
+load_dotenv()
 
 # --- Constants ---
-APP_NAME = "cosmo_app"
-USER_ID = "cosmo_user"
-SESSION_ID = "cosmo_session"
+APP_NAME = config["app"]["name"]
+USER_ID = config["app"]["user_id"]
+SESSION_ID = config["app"]["session_id"]
 
 # --- Configure Logging ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+cosmo_flow_agent = CosmoFlowAgent(  
+    name="CosmoFlowAgent",  
+    main_agent=main_agent,  
+    search_agents=search_agents,  
+    vlm_agents=vlm_agents,  
+    aggregator_agent=aggregator_agent,  
+)
 
 async def setup_session_and_runner():
     """Setup session service và runner"""

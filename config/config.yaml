@@ -1,0 +1,82 @@
+# Cosmo Configuration File
+# Cấu hình tổng hợp cho toàn bộ repository
+
+# ===============================
+# API Configuration
+# ===============================
+ 
+# Local VLM Model Configuration
+local_vlm:
+    api_base_url: "http://108.172.120.126:31404/v1"
+    api_key: "sk-fake-key-for-local-model"
+    model_name: "hosted_vllm/OpenGVLab/InternVL3-8B"
+    
+# Milvus Search API
+milvus:
+    search_url: "http://70.29.215.74:36053/search_default_base64"
+    default_top_k: 5
+
+# ===============================
+# Application Configuration
+# ===============================
+app:
+  name: "cosmo_app"
+  user_id: "cosmo_user"
+  session_id: "cosmo_session"
+  version: "1.0.0"
+  
+# ===============================
+# Agent Configuration
+# ===============================
+agents:
+  # Main Coordinator Agent
+  main:
+    name: "MainCoordinator"
+    model: "gemini-2.5-pro"
+    temperature: 0.2
+    agent_id: 0
+    description: "Điều phối tìm kiếm ảnh và phân tích VLM"
+    output_key: "task_results"
+    
+  # Search Agents
+  search:
+    name_template: "SearchAgent{id}"
+    count: 3  # Số lượng search agents
+    model: "gemini-2.0-flash"
+    description_template: "Search Agent #{id} - Tìm kiếm ảnh"
+    output_key_template: "search_result_{id}"
+    agent_id_start: 1
+    
+  # VLM Agents
+  vlm:
+    count: 5  # Số lượng VLM agents
+    model: "gemini-2.5-pro"
+    description_template: "VLM Agent #{id} - Phân tích ảnh và trả lời câu hỏi"
+    output_key_template: "vlm_result_{id}"
+    agent_id_start: 11  # Offset để phân bổ key khác với search agents
+    
+  # Aggregator Agent
+  aggregator:
+    name: "AggregatorAgent"
+    model: "gemini-2.5-pro"
+    agent_id: 99
+    description: "Tổng hợp kết quả từ VLM agents và trả lời cuối cùng"
+
+# ===============================
+# Workflow Configuration
+# ===============================
+workflow:
+  # Parallel processing settings
+  parallel:
+    max_concurrent_searches: 3
+    max_concurrent_vlm: 5
+    
+
+# ===============================
+# File Paths & Directories
+# ===============================
+paths:
+  # Output directories
+  tools_results: "tools_results"
+
+

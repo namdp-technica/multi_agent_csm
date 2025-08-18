@@ -2,17 +2,21 @@ import requests
 import base64
 import os
 from typing import Dict, Any
+from utils.helper_workflow import load_config
+CONFIG_PATH = os.path.join(os.path.dirname(__file__),"..", "config", "config.yaml")
+config = load_config(config_path=CONFIG_PATH)
+
 def agent_tool(func):
     return func
-API_URL = "http://1.208.108.242:31229/search_default_base64"
+API_URL = config["milvus"]["search_url"]
 class Api:
     
-    def __init__(self, output_folder: str = "results"):
+    def __init__(self, output_folder: str = config["paths"]["tools_results"]):
         self.output_folder = output_folder
         os.makedirs(self.output_folder, exist_ok=True)
     
     @agent_tool
-    def image_search(self, query: str, k: int = 5) -> Dict[str, Any]:
+    def image_search(self, query: str, k: int = config["milvus"]["default_top_k"]) -> Dict[str, Any]:
         try:
             payload = {"query": query, "top": k}
             response = requests.post(API_URL, json=payload)
@@ -58,7 +62,7 @@ class Api:
 
 if __name__ == "__main__":
     print(":test_tube: Testing Image Search Tool with Milvus API...")
-    tool = Api(output_folder="results")
+    tool = Api(output_folder=config["paths"]["tools_results"])
     query = "温度差荷重の記号"
     k = 3
     results = tool.image_search(query=query, k=k)

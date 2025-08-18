@@ -1,290 +1,143 @@
-# 🌌 Cosmo Agent - Multi-Agent Research System
+## 🌌 Cosmo Agent — Hệ thống Multi‑Agent tìm kiếm ảnh + VLM
 
-Cosmo Agent là một hệ thống nghiên cứu thông minh sử dụng kiến trúc multi-agent để phân tích và trả lời các câu hỏi nghiên cứu phức tạp. Hệ thống sử dụng Google's Agent Development Kit (ADK) và ChromaDB để tạo ra một workflow hiệu quả với 1 main agent và 10 sub-agents chuyên biệt.
+Cosmo là một workflow multi‑agent xây dựng trên Google ADK (Agents Development Kit) để:
+- tách một câu hỏi (ưu tiên tiếng Nhật) thành các truy vấn con,
+- tìm ảnh liên quan qua Milvus Search API,
+- phân tích ảnh song song bằng nhiều VLM agents,
+- và tổng hợp câu trả lời cuối cùng.
 
-## 🎯 Tính năng chính
+### 🎯 Tính năng chính
+- **🤖 Orchestration bằng Google ADK**: `CosmoFlowAgent` điều phối Main → Search (song song) → VLM (song song) → Aggregator
+- **🔑 Xoay vòng API key**: tự gán key theo `agent_id` để tránh quota limit
+- **⚡ Song song hóa**: phân lô ảnh và chạy nhiều VLM agents cùng lúc
+- **🧩 Tối ưu prompt**: Main/VLM dùng prompt chuyên biệt (tiếng Nhật)
+- **🪵 Logging rõ ràng**: theo dõi sự kiện/phiên làm việc
 
-- **🤖 Multi-Agent Architecture**: 1 main agent điều phối + 10 sub-agents thực thi song song
-- **🔍 Vector Database Search**: Tích hợp ChromaDB với BGE-M3 embeddings
-- **⚡ Parallel Processing**: Thực thi các tác vụ con song song để tối ưu hóa thời gian
-- **🔄 Retry Mechanism**: Tự động thử lại với các truy vấn được cải thiện
-- **📊 Detailed Logging**: Theo dõi chi tiết timing và workflow
-- **💬 Interactive Mode**: Giao diện command-line thân thiện
-
-## 🏗️ Kiến trúc hệ thống
-
-### Workflow Process
+### 🏗️ Quy trình
 ```
-User Query → Main Agent (Task Decomposition) 
-           ↓
-           Sub-Agents (Parallel Execution)
-           ↓
-           Main Agent (Evaluation & Retry if needed)
-           ↓
-           Final Response + Follow-up Question
+User Query (JA) → Main Agent (chia tối đa 3 sub‑queries) → SearchAgents (gọi Milvus API, tải ảnh) → VLM Agents (phân tích ảnh) → Aggregator (tổng hợp câu trả lời JA)
 ```
-
-### Core Components
-
-1. **Main Agent (Coordinator)**
-   - Model: `gemini-2.5-pro`
-   - Nhiệm vụ: Phân tách task, đánh giá kết quả, tổng hợp
-   - Output: `evaluation_result`
-
-2. **Sub-Agents (10 Specialists)**
-   - Model: `gemini-2.0-flash`
-   - Nhiệm vụ: Vector database search
-   - Tools: Semantic search với ChromaDB
-   - Output: `search_result`
-
-3. **Vector Database**
-   - ChromaDB với BGE-M3 embeddings
-   - Persistent storage trong `/chroma_db`
 
 ## 📦 Cài đặt
 
-### Yêu cầu hệ thống
-- Python 3.8+
-- Google AI API key
-- Đủ RAM để chạy BGE-M3 model
+### Yêu cầu
+- Python 3.10+
+- API key Gemini (Google Generative AI)
+- Kết nối tới Milvus Search API (HTTP)
 
-### Cài đặt dependencies
-
+### Cài dependencies
 ```bash
-pip install google-genai google-adk
-pip install chromadb sentence-transformers
-pip install asyncio logging
+pip install -r requirements.txt
 ```
 
-### Cấu hình
-
-1. **Google AI API Key**: Thiết lập API key trong environment
+### Thiết lập môi trường
 ```bash
-export GOOGLE_API_KEY="your_api_key_here"
+cp config.env.example config.env
+# Mở file config.env và điền GEMINI_API_KEY_* hoặc GEMINI_API_KEY
 ```
 
-2. **ChromaDB**: Database sẽ được tạo tự động trong thư mục `./chroma_db`
+### Cấu hình ứng dụng (`config/config.yaml`)
+Các mục chính:
+```yaml
+app:
+  name: "cosmo_app"
+  user_id: "cosmo_user"
+  session_id: "cosmo_session"
 
-## 🚀 Cách sử dụng
+milvus:
+  search_url: "http://70.29.215.74:36053/search_default_base64"
+  default_top_k: 5
 
-### Chế độ Fixed Query (Default)
+agents:
+  main:
+    name: "MainCoordinator"
+    model: "gemini-2.5-pro"
+    temperature: 0.2
+    agent_id: 0
+    output_key: "task_results"
+  search:
+    count: 3
+    model: "gemini-2.0-flash"
+  vlm:
+    count: 5
+    model: "gemini-2.5-pro"
+  aggregator:
+    name: "AggregatorAgent"
+    model: "gemini-2.5-pro"
+    agent_id: 99
+
+paths:
+  tools_results: "tools_results"
+```
+
+Tùy chọn (chưa bật mặc định) cho Local VLM nằm dưới `local_vlm` trong YAML và đoạn code mẫu comment trong `agent/agent.py`.
+
+## 🚀 Chạy thử
 ```bash
 python main.py
 ```
-Hệ thống sẽ chạy với câu hỏi mặc định về quantum computing và cryptography.
+- Chọn 1 câu hỏi mẫu hoặc nhập câu hỏi của bạn (nên dùng tiếng Nhật để khớp prompt).
+- Kết quả in ra console; ảnh tải về lưu ở `tools_results/` với tên dạng `doc_<id>.png`.
 
-### Chế độ Interactive
-Chỉnh sửa `main.py` để sử dụng interactive mode:
+Bạn cũng có thể gọi trực tiếp trong mã:
 ```python
-# Trong hàm main(), thay thế:
-# result = await run_cosmo_workflow(fixed_query)
-# Bằng:
-await interactive_mode()
+from main import run_cosmo_workflow
+import asyncio
+asyncio.run(run_cosmo_workflow("温度差荷重の記号について教えてください"))
 ```
 
-### Batch Processing
-```python
-queries = [
-    "AI trong giáo dục",
-    "Blockchain và an ninh mạng",
-    "Machine learning trong y tế"
-]
-results = await batch_process_queries(queries)
-```
+## 🔧 Thành phần chính
+
+- **`workflow/cosmo_workflow.py`**: định nghĩa `CosmoFlowAgent` (kế thừa `BaseAgent`) và luồng orchestration. Sử dụng `ParallelAgent` cho SearchAgents.
+- **`agent/agent.py`**: tạo `main_agent`, danh sách `search_agents` (3), `vlm_agents` (5), và `aggregator_agent`. Dùng xoay vòng API key theo `agent_id`.
+- **`agent/load_agent.py`**: `ApiKeyManager` và hàm `create_agent_with_api_key_rotation`.
+- **`tools/tools.py`**: lớp `Api` với tool `image_search(query, k)` gọi Milvus API, giải mã base64 và lưu ảnh vào `tools_results/`.
+- **`workflow/vlm_runner.py`**: phân lô ảnh cho các VLM agent và chạy song song qua ADK `Runner`.
+- **`prompt.py`**: prompt cho Main/Search/VLM/Aggregator (Main & VLM bắt buộc xuất/nhập tiếng Nhật).
+- **`utils/helper_workflow.py`**: tiện ích đọc cấu hình, chia ảnh, chuẩn bị input kèm ảnh cho VLM.
 
 ## 📁 Cấu trúc dự án
-
 ```
-/home/namdp/Cosmo/
-├── main.py                    # Entry point chính
-├── prompt.py                  # Prompts cho agents
-├── agent/
-│   ├── agent.py              # Định nghĩa main agent & sub-agents
-│   └── __pycache__/
-├── workflow/
-│   ├── cosmo_workflow.py     # Logic workflow chính
-│   └── __pycache__/
-├── tools/
-│   ├── __init__.py
-│   ├── tools.py              # VectorDatabaseTool
-│   └── __pycache__/
-├── chroma_db/                 # ChromaDB persistent storage
-│   ├── chroma.sqlite3
-│   └── vector_data/
-└── __pycache__/
-```
-
-## 🔧 Các thành phần chi tiết
-
-### 1. Main Agent (Coordinator)
-- **Model**: Gemini 2.5 Pro
-- **Chức năng**:
-  - **Mode 1**: Phân tách user query thành các sub-tasks
-  - **Mode 2**: Đánh giá kết quả từ sub-agents và quyết định retry
-- **Output**: JSON format với task list hoặc evaluation result
-
-### 2. Sub-Agents (Specialists)
-- **Số lượng**: 10 agents (`agent_search_1` đến `agent_search_10`)
-- **Model**: Gemini 2.0 Flash
-- **Tools**: Vector database semantic search
-- **Chức năng**: Thực hiện tìm kiếm chuyên biệt theo assigned tasks
-
-### 3. Vector Database Tool
-- **Engine**: ChromaDB
-- **Embeddings**: BGE-M3 (BAAI/bge-m3)
-- **Features**:
-  - Semantic search
-  - Persistent storage
-  - Sample data auto-loading
-
-### 4. Workflow Engine (CosmoWorkflow)
-- **Base Class**: BaseAgent từ Google ADK
-- **Steps**:
-  1. Task Decomposition (Main Agent)
-  2. Parallel Sub-Agent Execution
-  3. Result Evaluation (Main Agent)
-  4. Retry if needed
-  5. Final Summary + Follow-up Question
-
-## 📊 Monitoring & Logging
-
-### Timing Breakdown
-Hệ thống track chi tiết thời gian thực thi:
-- **Step 1**: Task Decomposition
-- **Step 2**: Sub-agents Parallel Execution  
-- **Step 3**: Main Agent Evaluation
-- **Step 4**: Retry (nếu cần)
-- **Total**: Tổng thời gian workflow
-
-### Session State
-```json
-{
-  "user_query": "Original user question",
-  "task_list": [...],
-  "search_results": {...},
-  "evaluation_result": {...},
-  "workflow_status": "completed",
-  "execution_time": 15.67,
-  "workflow_timing": {
-    "step1_duration": 3.2,
-    "step2_duration": 8.5,
-    "step3_duration": 2.1,
-    "step4_duration": 1.87
-  }
-}
+Cosmo/
+├─ main.py
+├─ config/
+│  └─ config.yaml
+├─ config.env.example
+├─ requirements.txt
+├─ prompt.py
+├─ agent/
+│  ├─ agent.py
+│  └─ load_agent.py
+├─ tools/
+│  └─ tools.py
+├─ utils/
+│  └─ helper_workflow.py
+└─ workflow/
+   ├─ cosmo_workflow.py
+   └─ vlm_runner.py
 ```
 
-## 🎛️ Cấu hình tùy chỉnh
+## 🧪 Ghi chú vận hành
+- SearchAgents nhận sub‑query từ MainAgent qua `ctx.session.state["search_query_i"]` và gọi `image_search`.
+- VLMAgents nhận câu hỏi gốc + ảnh (nếu file tồn tại ở `tools_results/`) và trả lời bằng tiếng Nhật theo luật chặt chẽ (không suy diễn).
+- Aggregator gộp các câu trả lời của VLM thành câu trả lời cuối cùng (tiếng Nhật, không giải thích).
 
-### Thay đổi số lượng Sub-Agents
-Trong `agent/agent.py`:
-```python
-# Thay đổi range để có nhiều hơn/ít hơn 10 agents
-for i in range(1, 15):  # Tạo 14 agents
-    agent_name = f"agent_search_{i}"
-    # ...
-```
+## 🩺 Troubleshooting
+- **API keys**: đảm bảo `config.env` có `GEMINI_API_KEY` hoặc `GEMINI_API_KEY_1..n`. Biến môi trường được nạp qua `python-dotenv`.
+- **Milvus API**: kiểm tra `config/config.yaml` mục `milvus.search_url` và kết nối mạng. API trả JSON có `image_base64`.
+- **File ảnh**: nếu ảnh không tải được, kiểm tra quyền ghi thư mục `tools_results/` và dung lượng đĩa.
+- **Phiên/ADK**: lỗi khởi tạo `Runner`/`SessionService` thường do cấu hình `app` hoặc môi trường python.
 
-### Custom Prompts
-Chỉnh sửa `prompt.py` để thay đổi behavior:
-- `MAIN_AGENT_PROMPT`: Logic coordinator
-- `SEARCH_AGENT_PROMPT`: Sub-agent instructions
-
-### Database Configuration
-Trong `tools/tools.py`:
-```python
-# Thay đổi đường dẫn database
-db_path = "./custom_chroma_db"
-collection_name = "my_knowledge_base"
-```
-
-## 🔬 Testing & Development
-
-### Test cơ bản
-```bash
-python main.py
-```
-
-### Debug Mode
-Bật detailed logging:
-```python
-logging.basicConfig(level=logging.DEBUG)
-```
-
-### Performance Testing
-```python
-# Test với multiple queries
-queries = ["Query 1", "Query 2", "Query 3"]
-start_time = time.time()
-results = await batch_process_queries(queries)
-total_time = time.time() - start_time
-print(f"Total time for {len(queries)} queries: {total_time:.2f}s")
-```
-
-## 🚧 Troubleshooting
-
-### Common Issues
-
-1. **API Key Issues**
-```bash
-# Kiểm tra API key
-echo $GOOGLE_API_KEY
-```
-
-2. **Memory Issues với BGE-M3**
-```python
-# Giảm batch size hoặc sử dụng model nhỏ hơn
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-```
-
-3. **ChromaDB Permission Errors**
-```bash
-# Đảm bảo quyền write
-chmod -R 755 ./chroma_db/
-```
-
-4. **Workflow Timeout**
-```python
-# Tăng timeout trong async operations
-await asyncio.wait_for(workflow_task, timeout=300)
-```
-
-## 📈 Performance Notes
-
-- **Parallel Efficiency**: 10 sub-agents có thể chạy song song
-- **Model Selection**: 
-  - Gemini 2.5 Pro cho reasoning phức tạp
-  - Gemini 2.0 Flash cho speed
-- **Memory Usage**: BGE-M3 cần ~2GB RAM
-- **Typical Execution**: 10-30 giây cho một query phức tạp
-
-## 🔮 Future Enhancements
-
-- [ ] Web interface với FastAPI
-- [ ] Support multiple vector databases
-- [ ] Dynamic agent scaling
-- [ ] Real-time streaming responses
-- [ ] Custom embedding fine-tuning
-- [ ] Integration với external APIs
-- [ ] Multi-language support
-
-## 🤝 Contributing
-
-1. Fork repository
-2. Tạo feature branch
-3. Commit changes
-4. Push và tạo Pull Request
+## 🤝 Đóng góp
+1) Fork repo  2) Tạo branch  3) Commit  4) Mở Pull Request
 
 ## 📄 License
+Chưa chỉ định rõ trong repository. Vui lòng liên hệ tác giả nếu cần thông tin license.
 
-Dự án này thuộc về namdp-technica. Chi tiết license xem trong file LICENSE.
-
-## 📞 Support
-
-- **Repository**: namdp-technica/multi_agent_cosmo  
-- **Issues**: Tạo issue trên GitHub
-- **Email**: Contact qua GitHub profile
+## 📞 Hỗ trợ
+- Issues: mở ticket trên GitHub repo này
+- Email/Liên hệ: xem trang cá nhân của tác giả
 
 ---
 
-*🌌 Cosmo Agent - Connecting knowledge across the universe of information*
+🌌 Cosmo Agent — Orchestrating image search and VLM reasoning.

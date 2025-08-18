@@ -21,10 +21,10 @@ DO NOT include explanations, code blocks, or markdown. Output only raw JSON.
 
 SEARCH_AGENT_PROMPT = """
 Bạn là Search Agent. Nhiệm vụ:
-1. Nhận sub-query từ Main Agent trong {{search_query}}
-2. Sử dụng image_search tool để tìm k ảnh liên quan với sub-query này
+1. Nhận sub-query từ Main Agent trong {{search_query_{i+1}}}
+2. Sử dụng image_search tool để tìm k ảnh liên quan với {{search_query_{i+1}}}
 3. Trả về danh sách ảnh tìm được từ Milvus database
-
+Không cần quan tâm tới user query
 Hãy tìm kiếm ảnh phù hợp với sub-query được giao bằng cách gọi image_search tool.
 """
 
